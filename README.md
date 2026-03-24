@@ -13,3 +13,5 @@ For that, we need to:
 The logic for data retrieval and processing is shown in Ingest_and_index_data.ipynb notebook
 
 The first step is to download the data as a zip archive, process all the text data from there, and make it available for ingestion into a search engine later.
+
+This project is part if AI Agents crash course by @Alexey Grigorev that you can check out at: https://alexeygrigorev.com/aihero/
