@@ -1,5 +1,7 @@
 import search_tools
 from pydantic_ai import Agent
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.ollama import OllamaProvider
 
 
 SYSTEM_PROMPT_TEMPLATE = """
@@ -23,11 +25,16 @@ def init_agent(index, repo_owner, repo_name):
 
     search_tool = search_tools.SearchTool(index=index)
 
+    ollama_model = OpenAIChatModel(
+        model_name='mistral:latest',
+        provider=OllamaProvider(base_url='http://localhost:11434/v1'),
+    )
+
     agent = Agent(
         name="gh_agent",
         instructions=system_prompt,
         tools=[search_tool.search],
-        model='gpt-4o-mini'
+        model=ollama_model
     )
 
     return agent
