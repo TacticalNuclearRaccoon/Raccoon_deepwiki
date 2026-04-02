@@ -1,5 +1,9 @@
 # Knowledge engineering for AI usage
 
+## Demo video
+
+You can check here for [a quick demo](https://youtube.com/shorts/ptcqGc5WMac)
+
 The aim of this project is to create a conversational agent that can answer questions about any GitHub repository. Think of it as your personal AI assistant for documentation and code. If you're familiar with DeepWiki, it's similar, but tailored to your GitHub repository.
 
 For that, we need to:

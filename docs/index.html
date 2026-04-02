@@ -3,34 +3,360 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>RAG with Docling - Deniz Pekin</title>
+    <title>Building a GitHub FAQ Agent in 7 Days - Deniz Pekin</title>
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
     <main class="container">
       <article>
-        <h1>Raccoon Deepwiki:</h1>
+        <h1>Raccoon Deepwiki: Building a GitHub FAQ Agent in 7 Days</h1>
 
         <div class="meta">
-          <span class="date">Published: March 2026</span>
+          <span class="date">Published: April 2026</span>
           <span class="tags">
             <a href="#" class="tag">Python</a>
-            <a href="#" class="tag">AI</a>
+            <a href="#" class="tag">AI Agents</a>
+            <a href="#" class="tag">RAG</a>
             <a href="#" class="tag">Mistral</a>
             <a href="#" class="tag">PydanticAI</a>
+            <a href="#" class="tag">Streamlit</a>
           </span>
         </div>
 
         <p class="lead">
-          Raccoon Deepwiki is a small project to create a small project to
-          create a conversational agent that can answer questions about a Github
-          repository.
+          A week-long build log: following Alexey Grigorev's AI Agents crash
+          course, I went from zero to a fully deployed conversational agent that
+          can answer questions about any GitHub repository's documentation —
+          using local Mistral via Ollama, PydanticAI, and a custom search
+          pipeline.
         </p>
+
+        <img src="images/raccoondeepwiki.png" alt="visual" class="full-width" />
 
         <h2>Overview</h2>
-        <p></p>
-
+        <p>
+          The goal was straightforward: build an AI agent that retrieves data
+          from the FAQ section of a GitHub repository and answers user
+          questions. The course by
+          <a href="https://github.com/alexeygrigorev" class="inline-link"
+            >Alexey Grigorev</a
+          >
+          laid out the roadmap one component per day starting from raw data
+          ingestion and ending with a deployed web app.
         </p>
+        <p>
+          The final system targets the
+          <a href="https://github.com/DataTalksClub/faq" class="inline-link"
+            >DataTalksClub/faq</a
+          >
+          repository, specifically the data-engineering course FAQs. It indexes
+          the markdown files, runs a text-based search when a user asks a
+          question, and passes the retrieved context to a locally-running
+          Mistral model to generate a grounded answer with source links.
+        </p>
+
+        <h2>Day 1 Data Ingestion Pipeline</h2>
+        <p>
+          The first task was getting data into the system. Rather than cloning
+          repositories, I built a lightweight pipeline that downloads any GitHub
+          repo as a zip archive and parses its markdown files on the fly.
+        </p>
+        <p>
+          The <code>ingest.py</code> module does all of this in one function
+          call. It fetches the zip from GitHub's <code>codeload</code> endpoint,
+          iterates over every <code>.md</code> and <code>.mdx</code> file, and
+          uses the <code>python-frontmatter</code> library to extract both the
+          YAML front matter and the document body:
+        </p>
+        <pre><code>def read_repo_data(repo_owner, repo_name):
+    url = f'https://codeload.github.com/{repo_owner}/{repo_name}/zip/refs/heads/main'
+    resp = requests.get(url)
+
+    repository_data = []
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+
+    for file_info in zf.infolist():
+        filename = file_info.filename.lower()
+        if not (filename.endswith('.md') or filename.endswith('.mdx')):
+            continue
+        with zf.open(file_info) as f_in:
+            content = f_in.read()
+            post = frontmatter.loads(content)
+            data = post.to_dict()
+            _, filename_repo = file_info.filename.split('/', maxsplit=1)
+            data['filename'] = filename_repo
+            repository_data.append(data)
+
+    zf.close()
+    return repository_data</code></pre>
+        <p>
+          I tested it against two repositories: the DataTalksClub FAQ and one of
+          <a
+            href="https://github.com/TacticalNuclearRaccoon/code_instructions"
+            class="inline-link"
+            >my own repos</a
+          >
+          containing coding-agent instruction documents (best practices for
+          Python, Java, JS, etc.). Frontmatter metadata parsed cleanly, and
+          filenames were preserved for later source citations.
+        </p>
+
+        <h2>Day 2 Document Chunking</h2>
+        <p>
+          Raw markdown files can be very long. Before indexing, they need to be
+          broken into smaller pieces that a search index can match against
+          precisely. I explored three strategies:
+        </p>
+        <ul>
+          <li>
+            <strong>Simple sliding window</strong> fixed-size character windows
+            with overlap
+          </li>
+          <li>
+            <strong>Section-based splitting</strong> split on headings
+            (<code>#</code>, <code>##</code>, etc.)
+          </li>
+          <li>
+            <strong>AI-powered intelligent chunking</strong> ask an LLM to
+            decide where meaningful boundaries are
+          </li>
+        </ul>
+        <p>
+          The AI-powered approach was the most interesting to try and the most
+          painful in practice. I tested it against the EvidentlyAI documentation
+          (a very large corpus). An OpenAI API call immediately hit my usage
+          quota. Falling back to a local Hugging Face Mistral 7B model worked in
+          principle but took ages and eventually ran out of RAM I only managed
+          to process my 22-document coding-instructions repo before giving up.
+        </p>
+        <p>
+          The takeaway: <strong>start simple</strong>. The sliding window
+          chunker, implemented in <code>ingest.py</code>, is what ships in the
+          final system. It is predictable, fast, and good enough for FAQ-style
+          content where sections are already short.
+        </p>
+        <pre><code>def sliding_window(seq, size, step):
+    n = len(seq)
+    result = []
+    for i in range(0, n, step):
+        batch = seq[i:i+size]
+        result.append({'start': i, 'content': batch})
+        if i + size > n:
+            break
+    return result</code></pre>
+
+        <h2>Day 3 Search</h2>
+        <p>
+          With chunked documents ready, the next step was building a way to
+          retrieve the right ones at query time. I implemented three search
+          modes:
+        </p>
+        <ul>
+          <li>
+            <strong>Text search</strong> exact keyword matching using
+            <a
+              href="https://github.com/alexeygrigorev/minsearch"
+              class="inline-link"
+              >minsearch</a
+            >
+          </li>
+          <li>
+            <strong>Vector search</strong> semantic similarity using embeddings
+          </li>
+          <li><strong>Hybrid search</strong> combining both scores</li>
+        </ul>
+        <p>
+          The principle I took away: start with text search and only add
+          semantic search when keyword matching is demonstrably insufficient.
+          FAQ content is keyword-dense and text search handles it well. The
+          final <code>SearchTool</code> wraps the minsearch index and returns up
+          to five results per query:
+        </p>
+        <pre><code>class SearchTool:
+    def __init__(self, index):
+        self.index = index
+
+    def search(self, query: str) -> List[Any]:
+        return self.index.search(query, num_results=5)</code></pre>
+        <p>
+          The index is built over two fields <code>content</code> and
+          <code>filename</code> so both the document body and the file path are
+          searchable.
+        </p>
+
+        <h2>Day 4 Tools and the Agent Loop</h2>
+        <p>
+          This is the day where a chatbot becomes an agent. The key difference:
+          <strong>tools</strong>. An agent can decide to call a function,
+          inspect its output, and then decide what to say rather than generating
+          an answer from training data alone.
+        </p>
+        <p>
+          My first attempt used a local Hugging Face Mistral 7B model but it
+          turned out this model doesn't support tool/function calling. I had to
+          switch to an API-backed model. I wanted to stay with Mistral, so I
+          used the Mistral API via PydanticAI's OpenAI-compatible provider
+          (later switched to Ollama for local inference):
+        </p>
+        <pre><code>ollama_model = OpenAIChatModel(
+    model_name='mistral:latest',
+    provider=OllamaProvider(base_url='http://localhost:11434/v1'),
+)
+
+agent = Agent(
+    name="gh_agent",
+    instructions=system_prompt,
+    tools=[search_tool.search],
+    model=ollama_model
+)</code></pre>
+        <p>
+          Digging into the provider-specific response objects was the real
+          lesson here. Response formats differ significantly between LLM
+          providers; PydanticAI abstracts most of this, but tool-call parsing
+          required careful attention to the Mistral response schema.
+        </p>
+        <p>
+          The system prompt instructs the agent to always search before
+          answering and to cite sources as GitHub links:
+        </p>
+        <pre><code>Always include references by citing the filename of the source material you used.
+Replace it with the full path to the GitHub repository:
+"https://github.com/{repo_owner}/{repo_name}/blob/main/"
+Format: [LINK TITLE](FULL_GITHUB_LINK)</code></pre>
+
+        <h2>Day 5 Offline Evaluation</h2>
+        <p>
+          Shipping without evaluation is flying blind. Before Day 5, I had been
+          doing informal "vibe checks" asking questions and reading the answers.
+          That's a fine starting point, but it doesn't scale and can't catch
+          regressions.
+        </p>
+        <p>I built four things for evaluation:</p>
+        <ul>
+          <li>
+            A <strong>logging system</strong> (<code>logs.py</code>) that
+            captures every interaction agent name, system prompt, model, tools
+            used, and the full message history as a timestamped JSON file
+          </li>
+          <li>
+            An <strong>LLM-as-judge</strong> evaluation loop that feeds logged
+            conversations back to a model and asks it to score the response on
+            structured criteria
+          </li>
+          <li>
+            A set of <strong>evaluation criteria</strong> covering relevance,
+            accuracy, citation quality, and tone
+          </li>
+          <li>
+            A <strong>system prompt comparison</strong> to test different
+            prompting strategies against each other
+          </li>
+        </ul>
+        <pre><code>def log_interaction_to_file(agent, messages, source='user'):
+    entry = log_entry(agent, messages, source)
+
+    ts = entry['messages'][-1]['timestamp']
+    ts_str = ts.strftime("%Y%m%d_%H%M%S")
+    rand_hex = secrets.token_hex(3)
+
+    filename = f"{agent.name}_{ts_str}_{rand_hex}.json"
+    filepath = LOG_DIR / filename
+
+    with filepath.open("w", encoding="utf-8") as f_out:
+        json.dump(entry, f_out, indent=2, default=serializer)
+
+    return filepath</code></pre>
+        <p>
+          Key insight: collect real interaction data first, then build
+          evaluation on top of it. "Vibe checks" at the start are not
+          embarrassing they are necessary to accumulate enough data to make
+          automated evaluation meaningful.
+        </p>
+
+        <h2>Day 6 Modularization and Deployment</h2>
+        <p>
+          Up to this point everything lived in a single, messy notebook. Before
+          deploying, I had to clean house: new virtual environment, explicit
+          dependency list, and a proper module structure.
+        </p>
+        <p>The final codebase has five focused modules:</p>
+        <ul>
+          <li>
+            <code>ingest.py</code> downloads and indexes GitHub repositories
+          </li>
+          <li>
+            <code>search_tools.py</code> wraps the minsearch index as a callable
+            tool
+          </li>
+          <li>
+            <code>search_agent.py</code> creates and configures the PydanticAI
+            agent
+          </li>
+          <li><code>logs.py</code> persists conversation logs to JSON files</li>
+          <li>
+            <code>main.py</code> CLI entry point that ties everything together
+          </li>
+        </ul>
+        <p>
+          For the UI, I chose <strong>Streamlit</strong>. It wires up a full
+          chat interface streaming responses token by token in under 90 lines of
+          code. The <code>@st.cache_resource</code> decorator makes sure the
+          index is built once at startup and reused across all subsequent
+          requests:
+        </p>
+        <pre><code>@st.cache_resource
+def init_agent():
+    repo_owner = "DataTalksClub"
+    repo_name = "faq"
+
+    def filter(doc):
+        return "data-engineering" in doc["filename"]
+
+    st.write("Indexing repo...")
+    index = ingest.index_data(repo_owner, repo_name, filter=filter)
+    agent = search_agent.init_agent(index, repo_owner, repo_name)
+    return agent</code></pre>
+        <p>
+          I'm a Streamlit advocate for a specific reason: my boss has a habit of
+          catapulting POCs to production without asking. Streamlit's distinctive
+          look is a reliable signal that something is a prototype, not a product
+          so he leaves my experiments alone. A small but non-trivial engineering
+          advantage.
+        </p>
+
+        <h2>Day 7 What Was Built</h2>
+        <p>
+          Over seven days, the project went from nothing to a complete, running
+          system. Here is what ended up in the repo:
+        </p>
+        <ul>
+          <li>
+            A data pipeline that can ingest and index <em>any</em> GitHub
+            repository's markdown documentation
+          </li>
+          <li>A sliding-window chunker for splitting long documents</li>
+          <li>A text-based search engine backed by minsearch</li>
+          <li>
+            A PydanticAI agent with tool-calling, running Mistral locally via
+            Ollama
+          </li>
+          <li>An interaction logging system for offline analysis</li>
+          <li>An LLM-as-judge evaluation framework</li>
+          <li>A Streamlit web app with streaming responses</li>
+        </ul>
+        <p>
+          The biggest practical lessons: complexity should be earned, not
+          assumed. Simple chunking beat AI-powered chunking for this use case.
+          Text search beat vector search for FAQ-style content. Starting with
+          vibe checks is fine as long as you replace them with structured
+          evaluation before you ship.
+        </p>
+        <p>
+          The difference between a chatbot and an agent is tools. Everything
+          else the retrieval pipeline, the chunking strategy, the evaluation
+          framework exists to make those tool calls return something useful.
+        </p>
+
         <div class="project-links">
           <a
             href="https://github.com/TacticalNuclearRaccoon/Raccoon_deepwiki/"
